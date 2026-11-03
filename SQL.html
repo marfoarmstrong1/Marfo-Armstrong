@@ -1,0 +1,77 @@
+-- ===== MARFO CLOUD - PRO MULTI-USER SQL =====
+-- Run this once
+
+-- 1. Clean old policies
+drop policy if exists "Owner only" on files;
+drop policy if exists "Owner full access to storage" on storage.objects;
+drop policy if exists "Users can manage own files" on files;
+drop policy if exists "Users can manage own storage" on storage.objects;
+drop policy if exists "Admin sees all" on files;
+
+-- 2. Create files table (if not exists)
+create table if not exists public.files (
+  id uuid default gen_random_uuid() primary key,
+  owner_id uuid references auth.users(id) on delete cascade,
+  owner_email text,
+  name text not null,
+  size bigint,
+  type text,
+  folder text default 'My Files',
+  storage_path text not null,
+  is_starred boolean default false,
+  is_deleted boolean default false,
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now()
+);
+
+-- 3. Enable RLS
+alter table public.files enable row level security;
+
+-- 4. RLS: Users can ONLY manage their own files
+create policy "Users can manage own files"
+on public.files for all
+using (auth.uid() = owner_id)
+with check (auth.uid() = owner_id);
+
+-- 5. RLS: Admin marfoarmstrong1@gmail.com can see all for stats (read only)
+create policy "Admin can view all files"
+on public.files for select
+using (auth.email() = 'marfoarmstrong1@gmail.com');
+
+-- 6. Create private bucket
+insert into storage.buckets (id, name, public)
+values ('marfo-vault', 'marfo-vault', false)
+on conflict (id) do nothing;
+
+-- 7. Storage RLS: Users can only access folder with their user_id
+create policy "Users can manage own storage"
+on storage.objects for all
+using (
+  bucket_id = 'marfo-vault' 
+  and auth.uid()::text = (storage.foldername(name))[1]
+)
+with check (
+  bucket_id = 'marfo-vault' 
+  and auth.uid()::text = (storage.foldername(name))[1]
+);
+
+-- 8. Storage RLS: Admin can access all (for support)
+create policy "Admin can manage all storage"
+on storage.objects for all
+using (bucket_id = 'marfo-vault' and auth.email() = 'marfoarmstrong1@gmail.com')
+with check (bucket_id = 'marfo-vault' and auth.email() = 'marfoarmstrong1@gmail.com');
+
+-- 9. Create index for speed
+create index if not exists idx_files_owner on public.files(owner_id);
+create index if not exists idx_files_deleted on public.files(is_deleted);
+
+-- 10. Function to auto-update updated_at
+create or replace function update_updated_at()
+returns trigger as $$
+begin new.updated_at = now(); return new; end;
+$$ language plpgsql;
+
+drop trigger if exists files_updated_at on public.files;
+create trigger files_updated_at before update on public.files for each row execute function update_updated_at();
+
+-- DONE! Verify: SELECT * FROM storage.buckets;
